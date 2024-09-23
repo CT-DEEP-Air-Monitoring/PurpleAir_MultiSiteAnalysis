@@ -1,0 +1,681 @@
+---
+title: "![](DEEP_Header.png){out.width=1500px}"
+date: "<i> Report Created: `r format(Sys.Date(), '%B %Y')`</i>"
+output:
+  html_document:
+    css: "style.css"
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    toccolor: black
+    theme: lumen
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(
+  comment = '', fig.width = 11, fig.height = 7, warning= FALSE, message = FALSE, fig.align ="left")
+```
+
+```{r LIBRARY,include=FALSE}
+#Check at line 47-49 for to change directory to match your file path before running!!
+#Also line 203 for the state boundary!
+
+#Install packages if not done already 
+#install.packages("dplyr")
+#install.packages("lubridate")
+#install.packages("plotly")
+#install.packages("tidyverse")
+#install.packages("htmlwidgets")
+#install.packages("htmltools")
+#install.packages("gt")
+#install.packages("padr")
+#install.packages("zoo")
+#install.packages("magrittr")
+#install.pakagesc("leaflet")
+library(leaflet)
+library(sf)
+library(dplyr)
+library(lubridate)
+library(plotly)
+library(tidyverse)
+library(htmlwidgets)
+library(htmltools)
+library(gt)
+library(padr)
+library(zoo)
+library(magrittr)
+library(reshape2)
+```
+
+```{r format, echo=FALSE}
+setwd("P:/Community Monitoring/Working/PurpleAir/PurpleAirSites/Data_Files/")
+dir <- "P:/Community Monitoring/Working/PurpleAir/PurpleAirSites"
+dir_files <-"P:/Community Monitoring/Working/PurpleAir/PurpleAirSites/Data_Files"
+
+#listing all files
+all_files <- list.dirs(path = dir_files, full.names = TRUE)
+
+#This is listing all the files, I like doing this so you can just keep adding files to the folder, basically all PA files need to have "Purple_Air" in the file name
+PA_files <- list.files(path = all_files, pattern = "PurpleAir")
+PA_list <- lapply(PA_files, read.csv)
+
+#binding the rows!
+PA <- bind_rows(PA_list)
+
+#Timestamp
+PA$time_stamp <- as.numeric(PA$time_stamp)
+PA$time_stamp <- as.POSIXct(PA$time_stamp)
+
+#pulls only data with reference monitors
+PA <- subset(PA, PA$reference_monitor == 'Yes' ) 
+PA <- PA[c("time_stamp", "sensor_index", "name_on_map", "humidity", "temperature",
+           "pm2.5_atm_a", "pm2.5_atm_b")]
+PA$humidity <- as.numeric(PA$humidity)
+
+#Substituting null RH values with 55, so this will allow the correction to be done when an RH is missing but has a PM value
+#Not positive if this is right and might have to be a condition in the actually equation 
+PA$humidity[is.na(PA$humidity)] <- 55
+
+#Finds the average between the two columns, but if one value is greater than 1000, it just chooses the other column
+PA <- PA %>%
+  mutate(
+    atm_avg = if_else(pm2.5_atm_a > 1000 | PA$pm2.5_atm_b > 1000, 
+                      if_else(pm2.5_atm_a > 1000, PA$pm2.5_atm_b, pm2.5_atm_a), 
+                      (pm2.5_atm_a + PA$pm2.5_atm_b) / 2)
+  )
+
+
+#making epa correction columns
+PA$cf_30 <- ((0.524*PA$atm_avg) -(0.0862*PA$humidity)+5.75)
+PA$cf_30_50 <- (((0.786 * ((PA$atm_avg/20) - (3/2)) + 0.524 * 
+                    (1 - ((PA$atm_avg/20) - (3/2)))) * PA$atm_avg) - 
+                  (0.0862 * PA$humidity) + 5.75)
+PA$cf_50_210 <- ((0.786*PA$atm_avg)-(0.0862*PA$humidity)+5.75)
+PA$cf_210_260 <- ((0.69 * ((PA$atm_avg/50) - (21/5)) + 0.786 * (1 - ((PA$atm_avg/50) - (21/5)))) * PA$atm_avg) - 
+  (0.0862 * PA$humidity * (1 - ((PA$atm_avg/50) - (21/5)))) + (2.966 * ((PA$atm_avg/50) - (21/5))) + 
+  (5.75 * (1 - ((PA$atm_avg/50) - (21/5)))) + 
+  (8.84 * 10^(-4) * PA$atm_avg^2 * ((PA$atm_avg/50) - (21/5)))
+PA$cf_260 <- (2.966+(0.69*PA$atm_avg)+(8.84*10^(-4)*PA$atm_avg^2))
+
+#final correction column with selected equation
+PA$cf_final <- NA
+
+for (i in 1:nrow(PA)) {
+  value <- PA$atm_avg[i]  #get the value in atm_avg for the current row
+  
+  #check the value against the bins
+  if (value < 30) {
+    PA$cf_final[i] <- PA$cf_30[i]
+  } else if (value >= 30 && value < 50) {
+    PA$cf_final[i] <- PA$cf_30_50[i]
+  } else if (value >= 50 && value < 210) {
+    PA$cf_final[i] <- PA$cf_50_210[i]
+  } else if (value >= 210 && value < 260) {
+    PA$cf_final[i] <- PA$cf_210_260[i]
+  } else {
+    PA$cf_final[i] <- PA$cf_260[i]
+  }
+}
+
+#pulling only the needed columns 
+PA_data <- PA[c("time_stamp", "name_on_map", "cf_final")]
+names(PA_data) <-c("Date_Time", "Site", "PA_PM2.5")
+#only selecting purple air and not PA flex
+PA_collo <- PA_data[grepl("collo", PA_data$Site),]
+PA_data <- PA_data[!apply(PA_data, 1, function(row) any(grepl("collo", row, ignore.case = TRUE))), ]
+
+#Fixing Site name 
+PA_data$Site <- sub(" CTDEEP$", "", PA_data$Site)
+PA_data$Site <- sub(" CT DEEP$", "", PA_data$Site)
+PA_collo$Site <- sub("- collo CTDEEP$", "", PA_collo$Site)
+names(PA_collo)[3] <- "PA_collo"
+
+#Merging this with collo, so that if data is missing from the original purple air, the collo with be used 
+PA_data <- merge(PA_data, PA_collo, by = c("Date_Time", "Site"), all.x= TRUE)
+PA_data$PA_PM2.5[is.na(PA_data$PA_PM2.5)] <- PA_data$PA_collo[is.na(PA_data$PA_PM2.5)]
+PA_data$PA_collo <- NULL
+
+#changing date time format
+PA_data$Date_Time <- as.character(format(PA_data$Date_Time))
+
+#reference data, the data is merging based on this so only pull data from envista that
+#download the csv from Envista and open, delete summary 
+AS_files <- list.files(path = all_files, pattern = "AllSites", full.names = TRUE)
+AS_list <- lapply(AS_files, read.csv, skip = 2)
+
+for (i in 1:length(AS_list)){
+  #removing that random row that isnt needed
+  AS_list[[i]] <- AS_list[[i]][-c(1),]
+}
+AS <- bind_rows(AS_list)
+
+#Timestamp
+AS$Date_Time <- as.POSIXct(AS$Date...Time, format = "%m/%d/%Y %H:%M", TZ= "UTC")
+AS <- pad(AS)
+AS$Date_Time <- as.character(format(AS$Date_Time))
+
+#New names
+names(AS) <- sub("\\..*$", "", names(AS))
+
+#Removing the uneeded columns
+AS$Date <- NULL
+AS$New.1 <- NULL
+
+#New names 
+names(AS)[names(AS) == "East"] <- "East Hartford"
+names(AS)[names(AS) == "New"] <- "New Haven"
+
+#melting the data into one column
+AS <- melt(data = AS, 
+           id.vars = "Date_Time",
+           variable.name = "Site",
+           value.name = "T640_PM2.5")
+
+#Merging with PA!
+all <- merge(AS, PA_data, by = c("Date_Time", "Site"), all.x = TRUE)
+all$T640_PM2.5 <- as.numeric(format(all$T640_PM2.5))
+
+#Writing a csv for all data
+write.csv(all, paste0(dir, "/CT_RefSites_PurpleAirData.csv"), row.names=FALSE, na= " ")
+
+#adding units!
+all$units <- "(µg/m³)"
+
+#This adds the quarter an year, but I dont like the format so also changing that
+all$Quarter <- as.yearqtr(all$Date_Time, format = "%Y-%m-%d")
+all$Quarter <- format(all$Quarter, format = "%q")
+
+#Truncating the values 
+all$PA_PM2.5 <- trunc(all$PA_PM2.5 * 10) / 10
+```
+
+```{r csv link, echo=FALSE}
+#This is how the csv is inserted as a link, then is added to the text below
+readBin("CT_RefSites_PurpleAirData.csv", "raw", file.info("CT_RefSites_PurpleAirData.csv")$size) %>% 
+  openssl::base64_encode() -> encoded
+```
+
+A PurpleAir air quality monitoring sensor was installed at multiple sites within the CT DEEP monitoring network to evaluate the sensors performance tracking PM~2.5~ data against a reference. PurpleAir data was corrected using the extended U.S-wide correction equation developed by the EPA to reduce bias in sensor data (more information found here, pg 12-13: [AirNow](https://document.airnow.gov/airnow-fire-and-smoke-map-questions-and-answers.pdf)). Hourly data from 2023 was then compared to a T640X reference monitor located at the same location. The full dataset used can be downloaded here <a download="CT_RefSites_PurpleAirData.csv" href="`r sprintf('data:text/csv;base64,%s', encoded)`">Download CSV</a>.
+
+# Site Locations
+```{r, echo = FALSE, out.width="100%"}
+
+site_files <- list.files(path = all_files, pattern = "Coordinates", full.names = TRUE)
+site_list <- lapply(site_files, read.csv)
+sites <- bind_rows(site_list)
+
+st_bd <- st_read(dsn= "P:/Community Monitoring/Working/PurpleAir/PurpleAirSites/Data_Files/CT_Boundary.geojson", quiet = TRUE)
+leaflet(data = sites, options = leafletOptions(minZoom = 8,
+                                                           maxZoom = 18)) %>%
+  setView(lng = -72.6999, lat = 41.54901, zoom = 8.6) %>%
+  addTiles() %>%
+  addProviderTiles("Esri.WorldTopoMap", group = "Esri Topography") %>%
+  addProviderTiles("Esri.WorldImagery", group = "Esri World Imagery") %>%
+  addProviderTiles("OpenStreetMap", group = "OpenStreetMap") %>%
+  addProviderTiles("Esri.WorldGrayCanvas", group = "Esri GrayCanvas") %>%
+
+  addPolylines(data = st_bd, color = "#0D2C6C", weight = 2) %>%
+  
+  addCircleMarkers(
+    lng = sites$Longitude,                      
+    lat = sites$Latitude,                       
+     radius = 4,                               
+    weight = 1,
+    fillOpacity = 1,                        
+    fillColor = "#0D2C6C",
+    label = paste0(sites$Site, " (", sites$Site.Name, ")") %>%
+      lapply(htmltools::HTML),
+      labelOptions = labelOptions(permanent = TRUE, direction = "bottom",
+                                style = list("font-size" = "11px")), 
+      popup =paste0("Location: ", "<b>", sites$Site, "-", sites$Site.Name, "</b>", "<br/>",
+                   "Latitude: ", "<b>", sites$Latitude, "</b>", "<br/>",
+                   "Longitude: ", "<b>", sites$Longitude, "</b>", "<br/>",
+                   "Elevation (ft): ", "<b>", sites$Elevation..feet., "</b>", "<br/>"))%>%
+        
+        
+  addEasyButton(easyButton(
+      icon="fa-globe", title="Zoom Out to Connecticut",
+       onClick=JS("function(btn, map){ map.setZoom(9); }"))) %>%
+  
+  addScaleBar(position = c("bottomleft"), options = scaleBarOptions(maxWidth = 200, 
+                                                                    metric = TRUE, 
+                                                                    imperial = TRUE)) %>%
+  
+    addMiniMap(
+    tiles =  "Esri.WorldTopoMap"[1],
+    toggleDisplay = TRUE, minimized = TRUE) %>%
+         
+  addLegend("bottomright", opacity = 1.0,
+            colors = c("#0D2C6C"),
+            labels = c("CT DEEP PurpleAir and Reference Sensors")) %>%
+  addLayersControl(baseGroups= c("Esri GrayCanvas", "OpenStreetMap", "Esri Topography", "Esri World Imagery"), 
+                        options = layersControlOptions(collapses = T, autoZIndex = T))
+
+```
+
+# Sensor Details 
+## PurpleAir Specifications 
+
+<table border="2" style="border-collapse: collapse; border-color: black;">
+<tr style="background-color: #0D2C6C; color: white; text-align: left; border: 1px solid black;">
+<td style="border: 1px solid black; padding: 8px;"><b>Possible Configuration</td>
+<td style="border: 1px solid black; padding: 8px;"><b>Evaluated Configuration</td>
+<td style="border: 1px solid black; padding: 8px;"><b>Cost</td>
+<td style="border: 1px solid black; padding: 8px;"><b>Data Access</td>
+<td style="border: 1px solid black; padding: 8px;"><b>Power Supply</td>
+<td style="border: 1px solid black; padding: 8px;"><b>Considerations</td>
+<td style="border: 1px solid black; padding: 8px;"><b>Reference Monitor Compared</b></td>
+</tr>
+</tr>
+<tr style= "background-color: #white; color: black;border: 1px solid black;">
+<td rowspan = "2" style="border: 1px solid black; padding: 8px; vertical-align:top;"> PM~2.5~, Temperature, Relative Humidity, Pressure 
+</td>
+<td rowspan = "2" style="border: 1px solid black; padding: 8px; vertical-align:top;"> PM~2.5~
+</td>
+<td style="border: 1px solid black; padding: 8px; vertical-align:top;"><b> Sensor: </b> $229-$299 <br> <b> Outdoor Power Supply: </b> $40 
+</td>
+<td rowspan = "2" style="border: 1px solid black; padding: 8px; vertical-align:top;"> Micro SD card, WiFi connectivity, API download and live public online map 
+</td>
+<td rowspan = "2" style="border: 1px solid black; padding: 8px; vertical-align:top;"> Potted 5V USB outdoor power supply 12 ft mains plug 
+</td>
+<td rowspan = "2" style="border: 1px solid black; padding: 8px; vertical-align:top;"> -Affected by saltwater (issues with coastal use) <br> -Life Expectancy ~2 years <br> -Some parts replaceable, model specific 
+</td>
+<td rowspan = "2" style="border: 1px solid black; padding: 8px; vertical-align:top;"> <b> PM~2.5~: </b> Teledyne API T640X
+</td>
+</tr>
+</table>
+
+
+## Setup
+```{r, echo = FALSE, out.width = '110%', out.height= '110%', fig.show = 'hold', fig.align = 'left', fig.cap=' '}
+knitr::include_graphics(c("PurpleAir.png"))
+```
+
+```{r timeseries, results = 'asis', echo = FALSE}
+#This makes a list of time series plots with two loops, first through the quarter/year then through Site
+#Output is a time series graph for each quarter/year for each site
+timeseries = list()
+idx <- 1
+for (i in unique(all$Quarter)){
+  
+  i_all <- subset(all, all$Quarter==i)
+  
+  for (j in unique(i_all$Site)){
+    
+    j_all <- subset(i_all, i_all$Site==j)
+    j_all$Date_Time <- as.POSIXct(j_all$Date_Time)
+    
+    plot_name <- paste0("Q_", i, "_", j)
+    
+    timeseries[[plot_name]] <- plot_ly(data= j_all, x = ~Date_Time) %>%
+      add_lines(y = ~T640_PM2.5, name = "Reference", line = list(color = "black"), opacity = 0.9,
+      hoverinfo = 'text', text = ~paste0(format(Date_Time, "%m/%d/%y %H:%M"),"<br>","Reference: ", T640_PM2.5)) %>%
+      add_lines(y = ~PA_PM2.5, name = "PurpleAir", line = list(color = "blue"), opacity = 0.5,
+      hoverinfo = 'text', text = ~paste0(format(Date_Time, "%m/%d/%y %H:%M"),"<br>","PurpleAir: ", PA_PM2.5)) %>%            
+      layout(title = list(text= paste0(unique(j_all$Site),": PurpleAir PM", "<sub>2.5</sub>", " Comparision",
+                                        "<br>",
+                                        "<sup>", 
+                                        "Quarter ", unique(i_all$Quarter),  "<sup>")),
+             legend = list(orientation = 'h', title=list(text="Monitor Type:")), 
+             xaxis = list(title = " ",
+                          type = 'date',
+                          tickformat = "%B %d <br>%Y"),
+             annotations = list(x = 0.60, y = -0.17, text = paste0("<i> </i>"), 
+                                showarrow = F, xref='paper', yref='paper', 
+                                xanchor='right', yanchor='auto', xshift=0, yshift=0,
+                                font=list(size=12, color="grey")),
+             yaxis = list(title = paste0("PM","<sub>2.5</sub>", unique(j_all$units)), rangemode = 'tozero'))
+    idx <- idx + 1
+  }}
+
+```
+
+# Timeseries Comparison
+PurpleAir hourly data for PM~2.5~ were compared by quarter to reference values from a T640X analyzer (Q1: January-March, Q2: April-June, Q3: July-September, Q4: October-December).
+
+## Bridgeport {.tabset .tabset-fade .tabset-pills}
+### Quarter 1
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_1_Bridgeport']]
+```
+### Quarter 2
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_2_Bridgeport']]
+```
+### Quarter 3
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_3_Bridgeport']]
+```
+### Quarter 4
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_4_Bridgeport']]
+```
+
+## Cornwall {.tabset .tabset-fade .tabset-pills}
+### Quarter 1
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_1_Cornwall']]
+```
+### Quarter 2
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_2_Cornwall']]
+```
+### Quarter 3
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_3_Cornwall']]
+```
+### Quater 4
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_4_Cornwall']]
+```
+
+## Danbury {.tabset .tabset-fade .tabset-pills}
+### Quarter 1
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_1_Danbury']]
+```
+### Quarter 2
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_2_Danbury']]
+```
+### Quarter 3
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_3_Danbury']]
+```
+### Quarter 4
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_4_Danbury']]
+```
+
+## East Hartford {.tabset .tabset-fade .tabset-pills}
+### Quarter 1
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_1_East Hartford']]
+```
+### Quarter 2
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_2_East Hartford']]
+```
+### Quarter 3
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_3_East Hartford']]
+```
+### Quarter 4
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_4_East Hartford']]
+```
+
+## Groton {.tabset .tabset-fade .tabset-pills}
+### Quarter 1
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_1_Groton']]
+```
+### Quarter 2
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_2_Groton']]
+```
+### Quarter 3
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_3_Groton']]
+```
+### Quarter 4
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_4_Groton']]
+```
+
+## Hartford {.tabset .tabset-fade .tabset-pills}
+### Quarter 1
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_1_Hartford']]
+```
+### Quarter 2
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_2_Hartford']]
+```
+### Quarter 3
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_3_Hartford']]
+```
+### Quarter 4
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_4_Hartford']]
+```
+
+## New Haven {.tabset .tabset-fade .tabset-pills}
+### Quarter 1
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_1_New Haven']]
+```
+### Quarter 2
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_2_New Haven']]
+```
+### Quarter 3
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_3_New Haven']]
+```
+### Quarter 4
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_4_New Haven']]
+```
+
+## Waterbury {.tabset .tabset-fade .tabset-pills}
+### Quarter 1
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_1_Waterbury']]
+```
+### Quarter 2
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_2_Waterbury']]
+```
+### Quarter 3
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_3_Waterbury']]
+```
+### Quarter 4
+```{r, results = 'asis', echo = FALSE}
+timeseries[['Q_4_Waterbury']]
+```
+
+```{r, results = 'asis', echo = FALSE}
+
+#correlation plot
+#Removing nas for this one because correlation plots wont just ignore them
+all_corr <- na.omit(all)
+correlation <- tagList()
+idx <- 1
+for (i in unique(all_corr$Site)){
+  
+  i_all <- subset(all_corr, all_corr$Site==i)
+  
+  lm_calc <- lm(i_all$PA_PM2.5 ~ i_all$T640_PM2.5)
+  slope <- coef(lm_calc)[2]
+  y <- coef(lm_calc)[1]
+  r <- summary(lm_calc)$r.squared
+  
+  corrplot_name <- paste0(i)
+  
+  correlation[[corrplot_name]] <-plot_ly(data = i_all) %>% 
+    add_markers(x = i_all$T640_PM2.5, y = i_all$PA_PM2.5, name = " ", marker = list(color = "lightsteelblue",
+                                                                      line = list(color = "#0D2C6C",width = 1.3))) %>%
+    add_lines(x = i_all$T640_PM2.5, y = fitted(lm(i_all$PA_PM2.5 ~ i_all$T640_PM2.5)),name = " ", line=list(color = "black", width= 1)) %>%
+    layout(showlegend = F, 
+           title = list(text = paste0("PurpleAir and Reference Sensor: ", 
+                                      unique(i_all$Site)," PM", "<sub>2.5</sub>", " Correlation ", unique(i_all$units), "<br>",
+                                      "<sup>", "y=", round(slope, 3), "x + ", round(y,3), "  ", "R\u00b2", "=", round(r,3),"<sup>")),
+           annotations = list(x = 0.60, y = -0.07, text = paste0("<i> </i>"), 
+                              showarrow = F, xref='paper', yref='paper', 
+                              xanchor='right', yanchor='auto', xshift=0, yshift=0,
+                              font=list(size=12, color="grey")),
+           xaxis = list(title = "Reference", rangemode = 'tozero'), 
+           yaxis = list(title = "PurpleAir", rangemode = 'tozero'))
+  idx <- idx + 1
+}
+
+```
+# Correlation Comparison
+## PurpleAir and Reference Correlation {.tabset .tabset-fade .tabset-pills}
+### Bridgeport
+```{r, results = 'asis', echo = FALSE}
+correlation[["Bridgeport"]]
+```
+### Cornwall
+```{r, results = 'asis', echo = FALSE}
+correlation[["Cornwall"]]
+```
+### Danbury
+```{r, results = 'asis', echo = FALSE}
+correlation[["Danbury"]]
+```
+### East Hartford
+```{r, results = 'asis', echo = FALSE}
+correlation[["East Hartford"]]
+```
+### Groton
+```{r, results = 'asis', echo = FALSE}
+correlation[["Groton"]]
+```
+### Hartford
+```{r, results = 'asis', echo = FALSE}
+correlation[["Hartford"]]
+```
+### New Haven
+```{r, results = 'asis', echo = FALSE}
+correlation[["New Haven"]]
+```
+### Waterbury
+```{r, results = 'asis', echo = FALSE}
+correlation[["Waterbury"]]
+```
+
+```{r, echo = FALSE, results='asis'}
+
+#dropping NAs from the date column
+all <- all %>% drop_na(Date_Time)
+
+#Root mean square error
+rmse <- all_corr %>%
+  group_by(Site) %>%
+  summarize(
+    RMSE = sqrt(mean((T640_PM2.5 - PA_PM2.5)^2))
+  )
+  
+#Finding the na percent
+PA_na <- all %>%
+  group_by(Site) %>%
+  summarise(
+    total = n(),
+    na_count = sum(is.na(PA_PM2.5)),
+    na_percent = (na_count / total) * 100
+  )
+PA_na$na <- 100 - PA_na$na_percent
+PA_na <- PA_na[c("Site", "na")]
+names(PA_na)[2] <- "Completeness %"
+
+table <- merge(PA_na, rmse, by = "Site")
+
+#setting up data for a table
+EH_PM <- do.call(rbind, lapply(unique(all_corr$Site), function(d) {
+  EH_PM_model <- lm(PA_PM2.5 ~ T640_PM2.5, data = all_corr[all_corr$Site == d,])
+  data.frame(Site = d, Intercept = coef(EH_PM_model)[1],
+             Slope = coef(EH_PM_model)[2], r_squared = summary(EH_PM_model)$r.squared,
+             row.names = NULL)
+}))
+
+#Doing the stats for just the total combined 
+total <- all_corr %>%
+  summarize(
+    RMSE = sqrt(mean((T640_PM2.5 - PA_PM2.5)^2)))
+total$Site <- "Sites Combined"
+total_na <- all %>%
+  summarise(
+    total = n(),
+    na_count = sum(is.na(PA_PM2.5)),
+    na_percent = (na_count / total) * 100
+  )
+total_na$na <- 100 - total_na$na_percent
+total_na <- total_na[c("na")]
+total_na$Site <- "Sites Combined"
+names(total_na)[1] <- "Completeness %"
+total_model <- lm(PA_PM2.5 ~ T640_PM2.5, data = all_corr)
+total_table <- data.frame(Intercept = coef(total_model)[1],
+             Slope = coef(total_model)[2], r_squared = summary(total_model)$r.squared,
+             row.names = NULL)
+total_table$Site <- "Sites Combined"
+
+total <- merge(total, total_na, by = "Site")
+total <- merge(total, total_table, by = "Site")
+
+
+
+#binding them for the table!
+table <- merge(EH_PM, table, by = "Site", all.x = TRUE)
+
+table <- rbind(table, total)
+
+table <- table %>% mutate(across(where(is.numeric), ~ round(., 2)))
+table <- table[c("Site","r_squared", "Slope", "Intercept","RMSE", "Completeness %")]
+
+# Define the range for the slope
+slope_min <- 1.0 - 0.35
+slope_max <- 1.0 + 0.35
+
+#making a table!
+table1 <- table |>
+  gt(
+    rowname_col = "Site")|>
+  cols_width(everything() ~ px(130)) |>
+  tab_header(
+    title = ("PurpleAir PM\u2082.\u2085 Sites"),
+    subtitle = ("Sensor vs. Reference Correlations"))|>
+  cols_label(
+    r_squared = ("R\u00b2"),
+    Slope = ("Slope"),
+    Intercept = ("Intercept"),
+    "Completeness %" = ("Data Completeness"))|>
+  cols_align(
+    align = ("center"),
+    columns = everything())|>
+  sub_missing(
+    missing_text = "0.000")|>
+  tab_style(
+    style = list(cell_fill(color = "lightgrey")),
+    locations = cells_body(columns = everything(), rows = 9)
+  )|>
+   tab_footnote(
+    footnote =("Bolded values indicate the target was met for PM data according to the recommended EPA performance metrics."), 
+    locations = cells_title("subtitle"))|>
+  tab_options(
+      footnotes.font.size = px(11))|>
+tab_style(
+      style = list(cell_text(weight = "bold")), 
+      locations = cells_body(
+      columns = vars(r_squared),
+      rows = r_squared >= 0.7))|>
+tab_style(
+      style = list(cell_text(weight = "bold")), 
+      locations = cells_body(
+      columns = vars(Slope),
+      rows = Slope >= slope_min & Slope <= slope_max))|>
+tab_style(
+      style = list(cell_text(weight = "bold")), 
+      locations = cells_body(
+      columns = vars(Intercept),
+      rows =  Intercept > -5 & Intercept < 5))|>
+tab_style(
+      style = list(cell_text(weight = "bold")), 
+      locations = cells_body(
+      columns = vars(RMSE),
+      rows =  RMSE <= 7))
+      
+gtsave(table1, "table1.png")
+```
+
+# Results Summary
+```{r,fig.align = 'left', results='asis', echo = FALSE}
+knitr::include_graphics("table1.png")
+```
+
+# Contact Information
+Questions on Connecticut community based monitoring: DEEP.AirMonitoring@ct.gov <br>
+Questions on creating this report: Jessica.Landry@ct.gov
