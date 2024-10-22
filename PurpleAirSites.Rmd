@@ -73,7 +73,6 @@ PA <- PA[c("time_stamp", "sensor_index", "name_on_map", "humidity", "temperature
 PA$humidity <- as.numeric(PA$humidity)
 
 #Substituting null RH values with 55, so this will allow the correction to be done when an RH is missing but has a PM value
-#Not positive if this is right and might have to be a condition in the actually equation 
 PA$humidity[is.na(PA$humidity)] <- 55
 
 #Finds the average between the two columns, but if one value is greater than 1000, it just chooses the other column
