@@ -137,7 +137,7 @@ PA_data$PA_collo <- NULL
 #changing date time format
 PA_data$Date_Time <- as.character(format(PA_data$Date_Time))
 
-#reference data, the data is merging based on this so only pull data from envista that
+#reference data, the data is merging based on this so only pull data from envista for the time frame I want
 #download the csv from Envista and open, delete summary 
 AS_files <- list.files(path = all_files, pattern = "AllSites", full.names = TRUE)
 AS_list <- lapply(AS_files, read.csv, skip = 2)
@@ -180,7 +180,7 @@ write.csv(all, paste0(dir, "/CT_RefSites_PurpleAirData.csv"), row.names=FALSE, n
 #adding units!
 all$units <- "(µg/m³)"
 
-#This adds the quarter an year, but I dont like the format so also changing that
+#This adds the quarter an year, but reformatting because I only need Quarter with a full year of data
 all$Quarter <- as.yearqtr(all$Date_Time, format = "%Y-%m-%d")
 all$Quarter <- format(all$Quarter, format = "%q")
 
@@ -199,10 +199,12 @@ A PurpleAir air quality monitoring sensor was installed at multiple sites within
 # Site Locations
 ```{r, echo = FALSE, out.width="100%"}
 
+#This is creating the leaflet map, based on coordinate information I have in a csv stored in the directory
 site_files <- list.files(path = all_files, pattern = "Coordinates", full.names = TRUE)
 site_list <- lapply(site_files, read.csv)
 sites <- bind_rows(site_list)
 
+#adds the ct state boundary layey, this file has to be saved in your directory and then the full file path is called 
 st_bd <- st_read(dsn= "P:/Community Monitoring/Working/PurpleAir/PurpleAirSites/Data_Files/CT_Boundary.geojson", quiet = TRUE)
 leaflet(data = sites, options = leafletOptions(minZoom = 8,
                                                            maxZoom = 18)) %>%
@@ -291,8 +293,8 @@ knitr::include_graphics(c("PurpleAir.png"))
 ```
 
 ```{r timeseries, results = 'asis', echo = FALSE}
-#This makes a list of time series plots with two loops, first through the quarter/year then through Site
-#Output is a time series graph for each quarter/year for each site
+#This makes a list of time series plots with two loops, first through the quarter then through Site
+#Output is a time series graph for each quarter for each site in a list, then I can call each figure from the list where I would like
 timeseries = list()
 idx <- 1
 for (i in unique(all$Quarter)){
@@ -548,6 +550,7 @@ correlation[["Waterbury"]]
 ```
 
 ```{r, echo = FALSE, results='asis'}
+#All code below is runnng the statistics and binding them all together for the table
 
 #dropping NAs from the date column
 all <- all %>% drop_na(Date_Time)
@@ -605,8 +608,6 @@ total_table$Site <- "Sites Combined"
 total <- merge(total, total_na, by = "Site")
 total <- merge(total, total_table, by = "Site")
 
-
-
 #binding them for the table!
 table <- merge(EH_PM, table, by = "Site", all.x = TRUE)
 
@@ -615,7 +616,7 @@ table <- rbind(table, total)
 table <- table %>% mutate(across(where(is.numeric), ~ round(., 2)))
 table <- table[c("Site","r_squared", "Slope", "Intercept","RMSE", "Completeness %")]
 
-# Define the range for the slope
+# Define the range for the slope significant values, so these values can be highlighted in the table
 slope_min <- 1.0 - 0.35
 slope_max <- 1.0 + 0.35
 
@@ -672,6 +673,7 @@ gtsave(table1, "table1.png")
 
 # Results Summary
 ```{r,fig.align = 'left', results='asis', echo = FALSE}
+#including the table image
 knitr::include_graphics("table1.png")
 ```
 
